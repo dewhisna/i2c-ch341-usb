@@ -184,6 +184,8 @@ static uint speed_last = CH341_I2C_FAST_SPEED + 1;    // last used speed, defaul
 
 static uint poll_period = CH341_POLL_PERIOD_MS;       // module parameter poll period
 
+static bool enable_gpio = false;                      // enable/disable for GPIO support (removes IRQ overhead when not needed)
+
 // ----- function prototypes ---------------------------------------------
 
 static int ch341_usb_transfer (struct ch341_device *dev, int out_len, int in_len);
@@ -259,14 +261,18 @@ static int ch341_cfg_probe (struct ch341_device* ch341_dev)
             // if pin is INPUT, it has to be masked out in GPIO direction mask
             ch341_dev->gpio_mask &= ~ch341_dev->gpio_bits[ch341_dev->gpio_num];
 
-        DEV_INFO (CH341_IF_ADDR, "%s %s gpio=%d irq=%d %s",
-                  cfg->mode == CH341_PIN_MODE_IN ? "input " : "output",
-                  cfg->name, ch341_dev->gpio_num, ch341_dev->irq_num,
-                  cfg->hwirq ? "(hwirq)" : "");
+        if (enable_gpio) {
+            DEV_INFO (CH341_IF_ADDR, "%s %s gpio=%d irq=%d %s",
+                      cfg->mode == CH341_PIN_MODE_IN ? "input " : "output",
+                      cfg->name, ch341_dev->gpio_num, ch341_dev->irq_num,
+                      cfg->hwirq ? "(hwirq)" : "");
+        }
 
         ch341_dev->irq_num++;
         ch341_dev->gpio_num++;
     }
+
+    DEV_INFO (CH341_IF_ADDR, "GPIO functionality is %s", enable_gpio ? "enabled" : "disabled");
 
     return CH341_OK;
 }
@@ -1166,8 +1172,11 @@ static void ch341_usb_free_device (struct ch341_device* ch341_dev)
 {
     CHECK_PARAM (ch341_dev)
 
-    ch341_gpio_remove (ch341_dev);
-    ch341_irq_remove  (ch341_dev);
+    if (enable_gpio)
+    {
+        ch341_gpio_remove (ch341_dev);
+        ch341_irq_remove  (ch341_dev);
+    }
     ch341_i2c_remove  (ch341_dev);
     ch341_cfg_remove  (ch341_dev);
 
@@ -1219,34 +1228,48 @@ static int ch341_usb_probe (struct usb_interface* usb_if,
         if (usb_endpoint_is_bulk_out(epd)) ch341_dev->ep_out  = epd; else
         if (usb_endpoint_xfer_int   (epd)) ch341_dev->ep_intr = epd;
     }
-    // create URBs for handling interrupts
-    if (!(ch341_dev->intr_urb = usb_alloc_urb(0, GFP_KERNEL)))
-    {
-        DEV_ERR (&usb_if->dev, "failed to alloc URB");
-        ch341_usb_free_device (ch341_dev);
-        return -ENOMEM;
-    }
 
-    usb_fill_int_urb (ch341_dev->intr_urb, ch341_dev->usb_dev,
-                      usb_rcvintpipe(ch341_dev->usb_dev,
-                                     usb_endpoint_num(ch341_dev->ep_intr)),
-                      ch341_dev->intr_buf, CH341_USB_MAX_INTR_SIZE,
-                      ch341_usb_complete_intr_urb, ch341_dev,
-                      ch341_dev->ep_intr->bInterval);
+    if (enable_gpio)
+    {
+        // create URBs for handling interrupts
+        if (!(ch341_dev->intr_urb = usb_alloc_urb(0, GFP_KERNEL)))
+        {
+            DEV_ERR (&usb_if->dev, "failed to alloc URB");
+            ch341_usb_free_device (ch341_dev);
+            return -ENOMEM;
+        }
+
+        usb_fill_int_urb (ch341_dev->intr_urb, ch341_dev->usb_dev,
+                         usb_rcvintpipe(ch341_dev->usb_dev,
+                                        usb_endpoint_num(ch341_dev->ep_intr)),
+                         ch341_dev->intr_buf, CH341_USB_MAX_INTR_SIZE,
+                         ch341_usb_complete_intr_urb, ch341_dev,
+                         ch341_dev->ep_intr->bInterval);
+    } else {
+        ch341_dev->intr_urb = NULL;
+    }
 
     // save the pointer to the new ch341_device in USB interface device data
     usb_set_intfdata(usb_if, ch341_dev);
 
     if ((error = ch341_cfg_probe (ch341_dev)) ||  // initialize board configuration
-        (error = ch341_i2c_probe (ch341_dev)) ||  // initialize I2C adapter
-        (error = ch341_irq_probe (ch341_dev)) ||  // initialize IRQs
-        (error = ch341_gpio_probe(ch341_dev)))    // initialize GPIOs
+        (error = ch341_i2c_probe (ch341_dev)))    // initialize I2C adapter
     {
         ch341_usb_free_device (ch341_dev);
         return error;
     }
 
-    usb_submit_urb (ch341_dev->intr_urb, GFP_ATOMIC);
+    if (enable_gpio)
+    {
+        if ((error = ch341_irq_probe (ch341_dev)) ||  // initialize IRQs
+            (error = ch341_gpio_probe(ch341_dev)))    // initialize GPIOs
+        {
+            ch341_usb_free_device (ch341_dev);
+            return error;
+        }
+
+        usb_submit_urb (ch341_dev->intr_urb, GFP_ATOMIC);
+    }
 
     DEV_INFO (CH341_IF_ADDR, "connected");
 
@@ -1283,5 +1306,8 @@ MODULE_PARM_DESC(speed, " I2C bus speed: 0 (20 kbps), 1 (100 kbps), 2 (400 kbps)
 
 module_param(poll_period, uint, 0644);
 MODULE_PARM_DESC(poll_period, "GPIO polling period in ms (default 10 ms)");
+
+module_param(enable_gpio, bool, 0644);
+MODULE_PARM_DESC(enable_gpio, "Enable support for GPIO and IRQs");
 #endif // LINUX_VERSION_CODE < KERNEL_VERSION(3,4,0)
 
