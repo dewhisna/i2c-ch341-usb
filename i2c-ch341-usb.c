@@ -215,14 +215,14 @@ static int ch341_cfg_probe (struct ch341_device* ch341_dev)
         // --- check correct pin configuration ------------
 
         // is pin configurable at all
-        if (cfg->pin < 15 || cfg->pin > 22)
+        if ((cfg->pin < 15) || (cfg->pin > 22))
         {
             DEV_ERR(CH341_IF_ADDR, "pin %d: is not configurable", cfg->pin);
             return -EINVAL;
         }
 
         // is pin configured correctly as input in case of pin 21 and 22
-        if ((cfg->pin == 21 || cfg->pin == 22) && cfg->mode != CH341_PIN_MODE_IN)
+        if (((cfg->pin == 21) || (cfg->pin == 22)) && (cfg->mode != CH341_PIN_MODE_IN))
         {
             DEV_ERR(CH341_IF_ADDR, "pin %d: must be an input", cfg->pin);
             return -EINVAL;
@@ -291,7 +291,7 @@ static int ch341_i2c_set_speed (struct ch341_device *ch341_dev)
 
     CHECK_PARAM_RET (speed != speed_last, CH341_OK)
 
-    if (speed < CH341_I2C_LOW_SPEED || speed > CH341_I2C_HIGH_SPEED)
+    if ((speed < CH341_I2C_LOW_SPEED) || (speed > CH341_I2C_HIGH_SPEED))
     {
         DEV_ERR (CH341_IF_ADDR, "parameter speed can only have values from 0 to 3");
         speed = speed_last;
@@ -552,7 +552,7 @@ void ch341_irq_enable_disable (struct irq_data *data, bool enable)
     irq = data->irq - ch341_dev->irq_base;
 
     // valid IRQ is in range 0 ... ch341_dev->irq_num-1, invalid IRQ is -1
-    if (irq < 0 || irq >= ch341_dev->irq_num) return;
+    if ((irq < 0) || (irq >= ch341_dev->irq_num)) return;
 
     // enable local IRQ
     ch341_dev->irq_enabled[irq] = enable;
@@ -582,7 +582,7 @@ int ch341_irq_set_type (struct irq_data *data, unsigned int type)
     irq = data->irq - ch341_dev->irq_base;
 
     // valid IRQ is in range 0 ... ch341_dev->irq_num-1, invalid IRQ is -1
-    if (irq < 0 || irq >= ch341_dev->irq_num) return -EINVAL;
+    if ((irq < 0) || (irq >= ch341_dev->irq_num)) return -EINVAL;
 
     ch341_dev->irq_types[irq] = type;
 
@@ -601,7 +601,7 @@ static int ch341_irq_check (struct ch341_device* ch341_dev, uint8_t irq,
     CHECK_PARAM_RET (irq < ch341_dev->irq_num, -EINVAL);
 
     // valid IRQ is in range 0 ... ch341_dev->irq_num-1, invalid IRQ is -1
-    if (irq < 0 || irq >= ch341_dev->irq_num) return -EINVAL;
+    if ((irq < 0) || (irq >= ch341_dev->irq_num)) return -EINVAL;
 
     // if IRQ is disabled, just return with success
     if (!ch341_dev->irq_enabled[irq]) return CH341_OK;
@@ -609,11 +609,11 @@ static int ch341_irq_check (struct ch341_device* ch341_dev, uint8_t irq,
     type = ch341_dev->irq_types[irq];
 
     // for software IRQs dont check if IRQ is the hardware IRQ for rising edges
-    if (!hardware && irq == ch341_dev->irq_hw && new > old)
+    if (!hardware && (irq == ch341_dev->irq_hw) && (new > old))
         return CH341_OK;
 
-    if ((type & IRQ_TYPE_EDGE_FALLING && old > new) ||
-        (type & IRQ_TYPE_EDGE_RISING  && new > old))
+    if (((type & IRQ_TYPE_EDGE_FALLING) && (old > new)) ||
+        ((type & IRQ_TYPE_EDGE_RISING)  && (new > old)))
     {
         // DEV_DBG (CH341_IF_ADDR, "%s irq=%d %d %s",
         //          hardware ? "hardware" : "software",
@@ -753,7 +753,7 @@ static int ch341_gpio_poll_function (void* argument)
             // DEV_DBG (CH341_IF_ADDR, "polling GPIO is %u ms too early", -drift_ms);
             corr_ms = (corr_ms > 0) ? corr_ms - 1 : 0;
         }
-        else if (drift_ms > 0 && drift_ms < poll_period)
+        else if ((drift_ms > 0) && (drift_ms < poll_period))
         {
             // period was to long, decrease corr_ms by 1 ms
             // DEV_DBG (CH341_IF_ADDR, "polling GPIO is %u ms too late", drift_ms);
@@ -880,7 +880,7 @@ void ch341_gpio_set_multiple (struct gpio_chip *chip,
     CHECK_PARAM (bits);
 
     for (i = 0; i < ch341_dev->gpio_num; i++)
-        if (*mask & (1 << i) && ch341_dev->gpio_pins[i]->mode == CH341_PIN_MODE_OUT)
+        if ((*mask & (1 << i)) && (ch341_dev->gpio_pins[i]->mode == CH341_PIN_MODE_OUT))
         {
             if (*bits & (1 << i))
                 ch341_dev->gpio_io_data |= ch341_dev->gpio_bits[i];
@@ -928,7 +928,7 @@ int ch341_gpio_set_direction (struct gpio_chip *chip, unsigned offset, bool inpu
     CHECK_PARAM_RET (offset < ch341_dev->gpio_num, -EINVAL);
 
     // pin configured correctly if it is pin 21
-    if (ch341_dev->gpio_pins[offset]->pin == 21 && !input)
+    if ((ch341_dev->gpio_pins[offset]->pin == 21) && !input)
     {
         DEV_ERR(CH341_IF_ADDR, "pin 21: must be an input");
         return -EINVAL;
@@ -1048,7 +1048,7 @@ static int ch341_gpio_probe (struct ch341_device* ch341_dev)
     {
         // in case the pin as CS signal, it is an GPIO pin
         if ((result = gpio_request(gpio->base + j, ch341_board_config[i].name)) ||
-            (result = gpio_export (gpio->base + j, ch341_board_config[i].pin != 21 ? true : false)))
+            (result = (gpio_export (gpio->base + j, ch341_board_config[i].pin != 21) ? true : false)))
         {
             DEV_ERR (CH341_IF_ADDR, "failed to export GPIO %s: %d",
                      ch341_board_config[i].name, result);
