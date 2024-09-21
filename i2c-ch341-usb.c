@@ -377,99 +377,161 @@ static int ch341_i2c_transfer (struct i2c_adapter *adpt, struct i2c_msg *msgs, i
 {
     struct ch341_device* ch341_dev;
     int result;
-    int i, j, k;
+    int ndxMsg;
+    int ndxByte;
+    int bytes_remaining;        // Bytes of data for this msgs group remaining to transfer
+    int bytes_this_time;        // Bytes being sent in this packet
+    int bytes_overhead;         // Overhead bytes in this packet
+    int isFirstOrChange;        // First packet or changing WR->RD or RD->WR we need a start/restart
+    int isLast;                 // Last packet (needs a stop)
+    uint8_t *pBuf;              // Current buffer pointer in send/receive data
 
     uint8_t* ob;
     uint8_t* ib;
 
-    CHECK_PARAM_RET (adpt, EIO);
-    CHECK_PARAM_RET (msgs, EIO);
-    CHECK_PARAM_RET (num > 0, EIO);
+    CHECK_PARAM_RET (adpt, -EINVAL);
+    CHECK_PARAM_RET (msgs, -EINVAL);
+    CHECK_PARAM_RET (num > 0, -EINVAL);
 
     ch341_dev = (struct ch341_device *)adpt->algo_data;
 
-    CHECK_PARAM_RET (ch341_dev, EIO);
+    CHECK_PARAM_RET (ch341_dev, -EIO);
 
     mutex_lock (&ch341_lock);
 
     ob = ch341_dev->out_buf;
     ib = ch341_dev->in_buf;
 
-    for (i = 0; i < num; i++)
+    for (ndxMsg = 0; ndxMsg < num; ndxMsg++)
     {
-        // size larger than endpoint max transfer size
-        if ((msgs[i].len + (i == num-1 ? 6 : 5) > 32))
-        {
-            DEV_ERR (CH341_IF_ADDR, "size of data is too large for existing USB endpoints");
-            result = -EIO;
-            break;
-        }
+        result = 0;
 
-        if (msgs[i].flags & I2C_M_TEN)
+        if (msgs[ndxMsg].flags & I2C_M_TEN)
         {
             DEV_ERR (CH341_IF_ADDR, "10 bit i2c addresses not supported");
             result = -EINVAL;
             break;
         }
 
-        k = 0;
-
-        if (msgs[i].flags & I2C_M_RD) // i2c read operation
-        {
-            ob[k++] = CH341_CMD_I2C_STREAM;
-            ob[k++] = CH341_CMD_I2C_STM_STA;       // START condition
-            ob[k++] = CH341_CMD_I2C_STM_OUT | 0x1; // write len (only address byte)
-            ob[k++] = (msgs[i].addr << 1) | 0x1;   // address byte with read flag
-
-            if (msgs[i].len)
-            {
-                for (j = 0; j < msgs[i].len-1; j++)
-                    ob[k++] = CH341_CMD_I2C_STM_IN | 1;
-
-                ob[k++] = CH341_CMD_I2C_STM_IN;
-            }
-
-            // if the message is the last one, add STOP condition
-            if (i == num-1)
-                ob[k++]  = CH341_CMD_I2C_STM_STO;
-
-            ob[k++] = CH341_CMD_I2C_STM_END;
-
-            // wirte address byte and read data
-            result = ch341_usb_transfer(ch341_dev, k, msgs[i].len);
-
-            // if data were read
-            if (result > 0)
-            {
-                if (msgs[i].flags & I2C_M_RECV_LEN)
-                {
-                    msgs[i].buf[0] = result;  // length byte
-                    memcpy(msgs[i].buf+1, ib, msgs[i].len);
-                }
-                else
-                {
-                    memcpy(msgs[i].buf, ib, msgs[i].len);
-                }
-            }
+        // First read or write operation triggers a start, as well as changing WR<->RD:
+        isFirstOrChange = ((ndxMsg == 0) || ((msgs[ndxMsg].flags & I2C_M_RD) != (msgs[ndxMsg-1].flags & I2C_M_RD)));
+        // Always send start on read, since we always send a stop on reads:
+        if (msgs[ndxMsg].flags & I2C_M_RD) isFirstOrChange = 1;
+        // Note: back-to-back writes will only cause a start on the first write and stop on the last, if it's the last group...
+        //  WR : Start, Write, Stop
+        //  WR,WR : Start, Write, Write, Stop
+        //  WR,RD : Start, Write, Restart, Read, Stop
+        //  WR,RD,RD : Start, Write, Restart, Read, Stop, Start, Read, Stop
+        //  RD : Start, Read, Stop
+        //  RD,WR : Start, Read, Stop, Start, Write, Stop
+        //  RD,WR,WR : Start, Read, Stop, Start, Write, Write, Stop
+        isLast = (ndxMsg == (num-1));
+        bytes_remaining = msgs[ndxMsg].len;
+        pBuf = msgs[ndxMsg].buf;
+        // If we are receiving data or user requested length byte prefix, we
+        //  must have a valid buffer pointer:
+        if (!pBuf && (bytes_remaining || (msgs[ndxMsg].flags & I2C_M_RECV_LEN))) {
+            result = -EINVAL;
+            break;
         }
-        else // i2c write operation
+        if ((msgs[ndxMsg].flags & (I2C_M_RECV_LEN | I2C_M_RD)) == (I2C_M_RECV_LEN | I2C_M_RD))
         {
-            ob[k++] = CH341_CMD_I2C_STREAM;
-            ob[k++] = CH341_CMD_I2C_STM_STA;  // START condition
-            ob[k++] = CH341_CMD_I2C_STM_OUT | (msgs[i].len + 1);
-            ob[k++] = msgs[i].addr << 1;  // address byte
+            msgs[ndxMsg].buf[0] = 0;     // Initialize length byte
+            ++pBuf;
+        }
 
-            memcpy(&ob[k], msgs[i].buf, msgs[i].len);
-            k = k + msgs[i].len;
+        while (bytes_remaining || isFirstOrChange)
+        {
+            ndxByte = 0;
 
-            // if the message is the last one, add STOP condition
-            if (i == num-1)
-                ob[k++]  = CH341_CMD_I2C_STM_STO;
+            if (msgs[ndxMsg].flags & I2C_M_RD) // i2c read operation
+            {
+                bytes_this_time = min(bytes_remaining, CH341_USB_MAX_BULK_SIZE);
 
-            ob[k++]  = CH341_CMD_I2C_STM_END;
+                ob[ndxByte++] = CH341_CMD_I2C_STREAM;
+                if (isFirstOrChange)
+                {
+                    ob[ndxByte++] = CH341_CMD_I2C_STM_STA;       // START condition
+                    ob[ndxByte++] = CH341_CMD_I2C_STM_OUT | 0x1; // write len (only address byte)
+                    ob[ndxByte++] = (msgs[ndxMsg].addr << 1) | 0x1;   // address byte with read flag
+                }
 
-            // write address byte and data
-            result = ch341_usb_transfer (ch341_dev, k, 0);
+                if (bytes_this_time)
+                {
+                    if (bytes_this_time == bytes_remaining)
+                    {
+                        if (bytes_this_time > 1)
+                        {
+                            ob[ndxByte++] = CH341_CMD_I2C_STM_IN | (bytes_this_time-1);     // ACK
+                        }
+                        ob[ndxByte++] = CH341_CMD_I2C_STM_IN;                               // not ACK
+                    } else {
+                        ob[ndxByte++] = CH341_CMD_I2C_STM_IN | bytes_this_time;             // ACK
+                    }
+                }
+
+                // if the message is the last one for the read, add STOP condition
+                if (bytes_this_time == bytes_remaining)
+                    ob[ndxByte++]  = CH341_CMD_I2C_STM_STO;
+
+                ob[ndxByte++] = CH341_CMD_I2C_STM_END;
+
+                // write address byte and start (if this is the first time) and read data
+                result = ch341_usb_transfer(ch341_dev, ndxByte, bytes_this_time);
+                if (result < 0)             // Handle error condition
+                    break;
+
+                // if data was read
+                if (bytes_this_time)
+                {
+                    // FIXME?: Should it be an error if result!=bytes_this_time ??
+                    //  not sure if it's possible for device to send extra data though
+                    if (result == 0) {      // If we didn't receive data when we should, report I/O error
+                        result = -EIO;
+                        break;
+                    }
+
+                    if (msgs[ndxMsg].flags & I2C_M_RECV_LEN)
+                    {
+                        msgs[ndxMsg].buf[0] += bytes_this_time;     // Add length byte
+                    }
+                    memcpy(pBuf, ib, bytes_this_time);
+                }
+            }
+            else // i2c write operation
+            {
+                bytes_overhead = 3 + (isFirstOrChange ? 2 : 0) + (isLast ? 1 : 0);  // 3 for stream, end, and out size; 2 on first/change for start and I2C address; and last needs stop
+                bytes_this_time = min(bytes_remaining, (CH341_USB_MAX_BULK_SIZE - bytes_overhead));
+
+                ob[ndxByte++] = CH341_CMD_I2C_STREAM;
+
+                if (isFirstOrChange)
+                {
+                    ob[ndxByte++] = CH341_CMD_I2C_STM_STA;  // START condition
+                    ob[ndxByte++] = CH341_CMD_I2C_STM_OUT | (bytes_this_time + 1);
+                    ob[ndxByte++] = msgs[ndxMsg].addr << 1;  // address byte with write flag
+                } else {
+                    ob[ndxByte++] = CH341_CMD_I2C_STM_OUT | bytes_this_time;
+                }
+
+                memcpy(&ob[ndxByte], pBuf, bytes_this_time);
+                ndxByte += bytes_this_time;
+
+                // if the message is the last one, add STOP condition
+                if (isLast && (bytes_this_time == bytes_remaining))
+                    ob[ndxByte++]  = CH341_CMD_I2C_STM_STO;
+
+                ob[ndxByte++]  = CH341_CMD_I2C_STM_END;
+
+                // write address byte and start (if this is the first time) and write data
+                result = ch341_usb_transfer(ch341_dev, ndxByte, 0);
+                if (result < 0)             // Handle error condition
+                    break;
+            }
+
+            pBuf += bytes_this_time;
+            bytes_remaining -= bytes_this_time;
+            isFirstOrChange = 0;
         }
 
         if (result < 0)
