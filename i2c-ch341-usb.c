@@ -373,6 +373,28 @@ static int ch341_i2c_write_outputs (struct ch341_device* ch341_dev)
     return (result < 0) ? result : CH341_OK;
 }
 
+static int ch341_i2c_check_dev(struct ch341_device *ch341_dev, uint8_t addr)
+{
+    int retval;
+
+    ch341_dev->out_buf[0] = CH341_CMD_I2C_STREAM;
+    ch341_dev->out_buf[1] = CH341_CMD_I2C_STM_STA;
+    ch341_dev->out_buf[2] = CH341_CMD_I2C_STM_OUT;  // NOTE: must be zero length otherwise it messes up the device
+    ch341_dev->out_buf[3] = (addr << 1) | 0x1;
+    ch341_dev->out_buf[4] = CH341_CMD_I2C_STM_IN;   // NOTE: zero length here as well
+    ch341_dev->out_buf[5] = CH341_CMD_I2C_STM_STO;
+    ch341_dev->out_buf[6] = CH341_CMD_I2C_STM_END;
+
+    retval = ch341_usb_transfer(ch341_dev, 7, 1);
+    if (retval < 0)
+        return retval;
+
+    if (ch341_dev->in_buf[0] & 0x80)
+        return -ETIMEDOUT;
+
+    return 0;
+}
+
 static int ch341_i2c_transfer (struct i2c_adapter *adpt, struct i2c_msg *msgs, int num)
 {
     struct ch341_device* ch341_dev;
@@ -398,6 +420,14 @@ static int ch341_i2c_transfer (struct i2c_adapter *adpt, struct i2c_msg *msgs, i
     CHECK_PARAM_RET (ch341_dev, -EIO);
 
     mutex_lock (&ch341_lock);
+
+    result = ch341_i2c_check_dev(ch341_dev, msgs[0].addr);
+    if (result < 0)
+    {
+        // On device error, don't attempt to send messages.
+        //  Instead, drop through, release mutex, and exit with error:
+        num = 0;
+    }
 
     ob = ch341_dev->out_buf;
     ib = ch341_dev->in_buf;
@@ -546,7 +576,7 @@ static int ch341_i2c_transfer (struct i2c_adapter *adpt, struct i2c_msg *msgs, i
     return num;
 }
 
-static u32 ch341_i2c_func (struct i2c_adapter *dev)
+static u32 ch341_i2c_func (struct i2c_adapter *ch341_dev)
 {
     return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL;
 }
