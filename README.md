@@ -4,7 +4,7 @@ The driver can be used with **CH341A** USB to UART/I2C/SPI adapter boards to con
 
 Additionally, CH341A data pins that are not used for synchronous serial interfaces can be configured as **GPIO** pins. The driver can generate **software interrupts** for all input pins. **One input** pin can be connected with the CH341A interrupt pin to generate **hardware interrupts**. 
 
-The I2C interface driver was initially derived from [CH341 I2C driver from Tse Lun Bien](https://github.com/allanbian1017/i2c-ch341-usb.git) and extended by GPIO and interrupt handling capabilities.
+The I2C interface driver was initially derived from [CH341 I2C driver from Tse Lun Bien](https://github.com/allanbian1017/i2c-ch341-usb.git) and [extended by GPIO and interrupt handling capabilities](https://github.com/gschorcht/i2c-ch341-usb). This fork is a rewrite of that to extend the I2C operations to unlimited size, add an option to enable/disable GPIO functionality to avoid module interrupt overhead when not using it for GPIO functions, restore I2CDetect functionality, and fix a few minor bugs.
 
 ## I2C interface limitations
 
@@ -14,7 +14,9 @@ Currently only basic I2C read and write functions (**`I2C_FUNC_I2C`**) are suppo
 
 The CH341A only supports **7 bit addressing**.
 
-Due of the limited CH341A USB endpoint buffer size of 32 byte that is used for I2C data as well as adapter in-band signaling, the driver supports only I2C messages with a **maximum data size of 26 bytes**.
+~~Due of the limited CH341A USB endpoint buffer size of 32 byte that is used for I2C data as well as adapter in-band signaling, the driver supports only I2C messages with a maximum data size of 26 bytes.~~ This fork fixes that size limitation. The size wasn't limited by the endpoint buffer size, as a 32-byte endpoint is fairly typical for USB. Instead, it was limited by the module simply not breaking the message into parts to transmit to the chip. This version implements that and allows essentially unlimited size -- limited only by the target device's capabilities.
+
+This I2C module conflicts with the SPI module for this CH341A chip, meaning only one of the two can be loaded at a time. See below.
 
 ## GPIO limitations
 
@@ -39,6 +41,8 @@ Data pins D0...D7, which are normally used for SPI interface but not for the I2C
 
 Since USB access is asynchronous, it is **not possible to guarantee exact timings** for GPIOs and interrupts.
 
+GPIO functionality can be enabled/disabled on this module. The **default is DISABLED**. Pass `enable_gpio=1` when loading the module, or change the `enable_gpio` global variable to `true` before compiling, to enable it. This was done to avoid unnecessary USB polling of GPIO status and registering an URB with the kernel when not even using GPIO.
+
 ## Installation of the driver
 
 #### Prerequisites
@@ -58,7 +62,7 @@ on Debian based systems.
 The driver can be compiled with following commands:
 
 ```
-git clone https://github.com/gschorcht/i2c-ch341-usb.git
+git clone https://github.com/dewhisna/i2c-ch341-usb.git
 cd i2c-ch341-usb
 make
 sudo make install
@@ -72,7 +76,7 @@ If you do not want to install the driver in the kernel directory at all because 
 
 #### Loading
 
-Once the driver is installed, it should be loaded automatically when you connect a device with USB device id `1a86:5512`. If not try to figure out, whether the USB device is detected correctly using command
+Once the driver is installed, it should be loaded automatically when you connect a device with USB device id `1a86:5512`. If not, try to figure out whether the USB device is detected correctly using command
 
 ```
 lsusb
@@ -172,7 +176,7 @@ The higher GPIO polling rate is, the higher is the system usage by the kernel th
 GPIO polling rate can also be changed using the module parameter `poll_rate` either when loading the module, e.g.,
 
 ```
-sudo modprobe i2c_ch341_usb poll_rate=50
+sudo modprobe i2c_ch341_usb poll_rate=50 enable_gpio=1
 ```
 or as real `root` during runtime using the `sysfs`, e.g.,
 ```
@@ -190,7 +194,7 @@ The I2C bus speed can be configured using the module parameter `speed`. The foll
 | 0  | 20 kbps    |
 | 1  | 100 kbps   |
 | 2  | 400 kbps   |
-| 0  | 750 kbps   |
+| 3  | 750 kbps   |
 
 By default the driver uses an I2C bus speed of 100 kbps (speed=0). It can be changed using the module parameter `speed` either when loading the module, e.g.,
 ```
@@ -225,7 +229,7 @@ Function `close` can be used to close the device anytime.
 
 #### Data transfer with function `ioctl`
 
-Before data are transfered using function `ioctl`, a data structure of type `struct i2c_rdwr_ioctl_data` has to be created. This can either contain only a single I2C message of type `struct i2c_msg` or an array of I2C messages of type `struct i2c_msg`, all of which are transfered together as a combined transaction. In latter case each I2C message begins with start condition, but only the last ends with stop condition to indicate the end of the combined transaction.
+Before data are transfered using function `ioctl`, a data structure of type `struct i2c_rdwr_ioctl_data` has to be created. This can either contain only a single I2C message of type `struct i2c_msg` or an array of I2C messages of type `struct i2c_msg`, all of which are transfered together as a combined transaction. In the latter case, the multiple messages will be assembled to have the correct combined start and stop transactions. Multiple reads will each begin with a start or restart condition and end with a stop condition. This allows for a Write->Read transition to combine properly for writing the register or address to the device, followed by a restart, needed to change the R/W bit for reading the data, followed by a stop to end the transaction after reading the data bytes. Consecutive writes, however, will combine as a single write transaction with one start at the beginning and a single stop at the end. This allows for having split source input buffers, such as one input buffer with the device register/address value and a second buffer with the data to write without needing to combine them. There is no specific limit to the number of data bytes for each message or transaction apart from the limitations of the target device and the data type for the message length variable.
 
 Each I2C message consists of 
 
@@ -439,3 +443,4 @@ To change the direction of a GPIO pin configured as input or output, simply writ
 ```
 echo out > /sys/class/gpio/gpio4/direction
 ```
+
